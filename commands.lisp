@@ -168,8 +168,26 @@ previously obtained using DUMP.")
 (def-cmd SET (key value) :status
   "Set a key to a string value.")
 
+(def-cmd BINARY-SET (key value) :status
+  "Set a key to a binary value.")
+
+(defmethod tell ((cmd (eql 'BINARY-SET)) &rest args)
+  (let ((all-args (cl:append (list (flex:string-to-octets "SET" :external-format +utf8+))
+                             args)))
+    (format-redis-line "*~A" (length all-args))
+    (dolist (arg all-args)
+      (format-redis-line "$~A" (length arg))
+      (write-sequence arg (conn-stream *connection*))
+      (terpri (conn-stream *connection*)))))
+
 (def-cmd GET (key) :bulk
   "Return the string value of the key.")
+
+(def-cmd BINARY-GET (key) :bytes
+   "Return binary value of the key.")
+
+(defmethod tell ((cmd (eql 'BINARY-GET)) &rest args)
+  (apply 'tell (cl:append (list 'GET) args)))
 
 (def-cmd GETSET (key value) :bulk
   "Set a key to a string returning the old value of the key.")
