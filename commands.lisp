@@ -178,7 +178,7 @@ previously obtained using DUMP.")
     (dolist (arg all-args)
       (format-redis-line "$~A" (length arg))
       (write-sequence arg (conn-stream *connection*))
-      (terpri (conn-stream *connection*)))))
+      (terpri% (conn-stream *connection*)))))
 
 (def-cmd GET (key) :bulk
   "Return the string value of the key.")

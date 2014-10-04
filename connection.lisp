@@ -26,7 +26,7 @@ for debugging purposes.  The default is *STANDARD-OUTPUT*.")
 (defclass redis-connection ()
   ((host
     :initarg  :host
-    :initform #(127 0 0 1)
+    :initform "localhost"
     :reader   conn-host)
    (port
     :initarg  :port
@@ -41,7 +41,11 @@ for debugging purposes.  The default is *STANDARD-OUTPUT*.")
     :accessor conn-socket)
    (stream
     :initform nil
-    :accessor conn-stream))
+    :accessor conn-stream)
+   (multiplexer
+    :initarg :multiplexer
+    :initform nil
+    :accessor conn-multiplexer))
   (:documentation "Representation of a Redis connection."))
 
 (defmethod initialize-instance :after ((conn redis-connection) &key)
@@ -55,26 +59,24 @@ for debugging purposes.  The default is *STANDARD-OUTPUT*.")
 (defun open-connection (conn)
   "Create a socket connection to the host and port of CONNECTION and
 set the socket of CONN to the associated socket."
-  (setf (conn-stream conn)
-        (flex:make-flexi-stream (usocket:socket-stream
-                                 (setf (conn-socket conn)
-                                       (usocket:socket-connect
-                                        (conn-host conn) (conn-port conn)
-                                        :element-type 'flex:octet)))
-                                :external-format +utf8+
-                                #-lispworks :element-type
-                                #-lispworks 'flex:octet))
-  (when (conn-auth conn)
-    (let ((*connection* conn)) ; AUTH needs *CONNECTION* to be bound
-                               ; to the current connection.  At this
-                               ; stage, *CONNECTION* is not bound yet.
-      (auth (conn-auth conn)))))
+  (let ((socket (iolib:make-socket :ipv6 nil
+                                   :connect :active
+                                   :type :stream)))
+    (handler-bind ((error (lambda (e)
+                             (declare (ignorable e))
+                             (ignore-errors (close socket)))))
+      (iolib:connect socket (iolib:lookup-hostname (conn-host conn)) :port (conn-port conn))
+      (setf (conn-stream conn) socket
+            (conn-socket conn) socket)
+      (when (conn-auth conn)
+        (let ((*connection* conn))
+          (auth (conn-auth conn)))))))
 
 (defun close-connection (conn)
   "Close the socket of CONN."
   (when (connection-open-p conn)
     (handler-case
-        (usocket:socket-close (conn-socket conn))
+        (close (conn-socket conn))
       (error (e)
         (warn "Ignoring the error that happened while trying to close ~
 Redis socket: ~A" e)))))
@@ -91,7 +93,7 @@ Redis socket: ~A" e)))))
   "Is there a current connection?"
   (and *connection* (connection-open-p *connection*)))
 
-(defun connect (&key (host #(127 0 0 1)) (port 6379) auth)
+(defun connect (&key (host #(127 0 0 1)) (port 6379) auth multiplexer)
   "Connect to Redis server."
   (when (connected-p)
     (restart-case (error 'redis-error
@@ -103,8 +105,10 @@ Redis socket: ~A" e)))))
         :report "Replace it with a new connection."
         (disconnect))))
   (setf *connection* (make-instance 'redis-connection
-                                    :host host :port port :auth auth)))
+                                    :host host :port port :auth auth :multiplexer multiplexer)))
 
+(defun conn-fd (connection)
+  (iolib:socket-os-fd (conn-socket connection)))
 
 (defun disconnect ()
   "Disconnect from Redis server."
@@ -116,14 +120,15 @@ Redis socket: ~A" e)))))
   "Close and reopen the connection to Redis server."
   (reopen-connection *connection*))
 
-(defmacro with-connection ((&key (host #(127 0 0 1))
+(defmacro with-connection ((&key (host "localhost")
                                  (port 6379)
-                                 auth)
+                                 auth
+                                 multiplexer)
                            &body body)
   "Evaluate BODY with the current connection bound to a new connection
 specified by the given HOST and PORT"
   `(let ((*connection* (make-instance 'redis-connection
-                                      :host ,host :port ,port :auth ,auth)))
+                                      :host ,host :port ,port :auth ,auth :multiplexer ,multiplexer)))
      (unwind-protect (progn ,@body)
        (disconnect))))
 
@@ -152,14 +157,14 @@ offering a :RECONNECT restart that will re-evaluate body after
 the conenction is re-established."
   (with-gensyms (e)
     `(handler-case (progn ,@body)
-       (usocket:connection-refused-error (,e)
+       (iolib:socket-connection-refused-error (,e)
          ;; Errors of this type commonly occur when there is no Redis server
          ;; running, or when one tries to connect to the wrong host or port.
          (reconnect-restart-case
            (:error ,e
             :comment "Make sure Redis server is running and check your connection parameters.")
            ,@body))
-       ((or usocket:socket-error stream-error end-of-file
+       ((or iolib:socket-error stream-error end-of-file
             #+lispworks comm:socket-error) (,e)
          (reconnect-restart-case (:error ,e)
            ,@body)))))

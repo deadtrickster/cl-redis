@@ -4,6 +4,11 @@
 (in-package #:redis)
 
 
+(defconstant +crlf-bytes+ #(13 10))
+
+(defun terpri% (out)
+  (write-sequence +crlf-bytes+ out))
+
 ;; Utils.
 
 (defun format-redis-line (fmt &rest args)
@@ -14,7 +19,7 @@ If *ECHOP-P* is not NIL, write that string to *ECHO-STREAM*, too."
         (out (conn-stream *connection*)))
     (when *echo-p* (format *echo-stream* " > ~A~%" str))
     (write-sequence (flex:string-to-octets str :external-format +utf8+) out)
-    (terpri out)))
+    (terpri% out)))
 
 
 ;;; Conditions
@@ -229,6 +234,45 @@ server with the first character removed."
 (defparameter *cmd-prefix* 'red
   "Prefix for functions names that implement Redis commands.")
 
+(defun maybe-multiplexed-tell-and-expect (cmd reply-type &rest args)
+  (print "mmtae")
+  (break)
+  (if-let (multiplexer (conn-multiplexer *connection*))
+    ;; multiplexed blocking io
+    (let ((connection *connection*)
+          (pipelined *pipelined*)
+          (callback *callback*))
+      (iolib:set-io-handler multiplexer (conn-fd *connection*)
+                            :write (lambda (fd event exception)
+                                      (declare (ignorable event exception))
+                                      (let ((*connection* connection)
+                                            (*pipelined* pipelined))
+                                        (apply #'tell cmd args))
+                                      (iolib:set-io-handler multiplexer
+                                                            fd
+                                                            :read
+                                                            (lambda (fd event exception)
+                                                               (declare (ignorable fd event exception))
+                                                               (let ((*connection* connection)
+                                                                     (*pipelined* pipelined))
+                                                                 (multiple-value-call callback
+                                                                   (multiple-value-prog1 (expect :anything)
+                                                                     (unless pipelined
+                                                                       (clear-input (conn-stream connection)))))))
+                                                            :one-shot (if (eql cmd 'subscribe) nil t)))
+                            :one-shot t))
+    (progn
+      (apply #'tell cmd args)
+      (prog1 (expect reply-type)
+        (unless *pipelined*
+          (clear-input (conn-stream *connection*)))))))
+
+(defvar *callback*)
+
+(defmacro with-callback (command callback)
+  `(let ((*callback* ,callback))
+     ,command))
+
 (defmacro def-cmd (cmd (&rest args) reply-type docstring)
   "Define and export a function with the name <*CMD-REDIX*>-<CMD> for
 processing a Redis command CMD.  Here REPLY-TYPE is the expected reply
@@ -241,15 +285,12 @@ format."
            (with-reconnect-restart
              ,(cond-it
                ((position '&optional args)
-                `(apply #'tell ',cmd ,@(subseq args 0 it)
+                `(apply 'maybe-multiplexed-tell-and-expect ',cmd ,reply-type ,@(subseq args 0 it)
                         (let ((optional-args (list ,@(nthcdr (1+ it) args))))
                           (subseq optional-args 0 (position nil optional-args)))))
                ((position '&rest args)
-                `(apply #'tell ',cmd ,@(subseq args 0 it) ,(nth (1+ it) args)))
-               (t `(tell ',cmd ,@args)))
-             (prog1 (expect ,reply-type)
-               (unless *pipelined*
-                 (clear-input (conn-stream *connection*)))))))
+                `(apply 'maybe-multiplexed-tell-and-expect ',cmd ,reply-type ,@(subseq args 0 it) ,(nth (1+ it) args)))
+               (t `(maybe-multiplexed-tell-and-expect ',cmd ,reply-type ,@args))))))
        (abbr ,cmd-name ,cmd)
        (export ',cmd-name '#:redis)
        (import ',cmd '#:red)
