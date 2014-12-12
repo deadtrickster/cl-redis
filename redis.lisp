@@ -4,7 +4,8 @@
 (in-package #:redis)
 
 
-(defconstant +crlf-bytes+ #(13 10))
+(unless (boundp '+crlf-bytes+)
+  (defconstant +crlf-bytes+ #(13 10)))
 
 (defun terpri% (out)
   (write-sequence +crlf-bytes+ out))
@@ -68,9 +69,14 @@ CMD is the command name (a string or a symbol), and ARGS are its arguments
                              args)))
     (format-redis-line "*~A" (length all-args))
     (dolist (arg all-args)
-      (let ((arg (princ-to-string arg)))
-        (format-redis-line "$~A" (flex:octet-length arg :external-format +utf8+))
-        (format-redis-line "~A"  arg)))))
+      (if (vectorp arg)
+          (progn
+            (format-redis-line "$~A" (length arg))            
+            (write-sequence arg (conn-stream *connection*))
+            (terpri% (conn-stream *connection*)))
+          (let ((arg (princ-to-string arg)))
+            (format-redis-line "$~A" (flex:octet-length arg :external-format +utf8+))
+            (format-redis-line "~A"  arg))))))
 
 
 ;; Pipelining
@@ -235,8 +241,6 @@ server with the first character removed."
   "Prefix for functions names that implement Redis commands.")
 
 (defun maybe-multiplexed-tell-and-expect (cmd reply-type &rest args)
-  (print "mmtae")
-  (break)
   (if-let (multiplexer (conn-multiplexer *connection*))
     ;; multiplexed blocking io
     (let ((connection *connection*)

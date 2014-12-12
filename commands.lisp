@@ -180,7 +180,7 @@ previously obtained using DUMP.")
       (write-sequence arg (conn-stream *connection*))
       (terpri% (conn-stream *connection*)))))
 
-(def-cmd GET (key) :bulk
+(def-cmd GET (key) :bytes
   "Return the string value of the key.")
 
 (def-cmd BINARY-GET (key) :bytes
